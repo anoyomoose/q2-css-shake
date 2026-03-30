@@ -38,28 +38,20 @@ function prettyBody(body: string): string {
   return parts.map(p => `    ${p};`).join('\n')
 }
 
-// ── main transform ──────────────────────────────────────────────────
+// ── block parser ───────────────────────────────────────────────────
 
-export function transformCSS(
-  css: string,
-  knownComponents: string[],
-  usedComponents: string[],
-  debug?: (msg: string) => void
-): string {
-  if (css.length === 0) return ''
+export interface Block {
+  selector: string   // everything before the opening { at depth 0
+  body: string       // everything from { to matching } inclusive
+  gapBefore: string  // inter-block text (whitespace / comments)
+}
 
-  const usedSet = new Set(usedComponents)
-
-  // ── Phase 1: extract top-level blocks via character walker ────────
-  // Each block = { selector, body, gapBefore }
-  // gapBefore = whitespace/comments between previous block and this selector
-
-  interface Block {
-    selector: string   // everything before the opening { at depth 0
-    body: string       // everything from { to matching } inclusive
-    gapBefore: string  // inter-block text (whitespace / comments)
-  }
-
+/**
+ * Parse a CSS string into top-level blocks via a character-by-character walker
+ * with depth tracking for strings, comments, parentheses, brackets, and braces.
+ * Each block contains the selector, body, and any preceding inter-block gap text.
+ */
+export function parseBlocks(css: string): Block[] {
   const blocks: Block[] = []
 
   let i = 0
@@ -207,6 +199,24 @@ export function transformCSS(
     }
     i++
   }
+
+  return blocks
+}
+
+// ── main transform ──────────────────────────────────────────────────
+
+export function transformCSS(
+  css: string,
+  knownComponents: string[],
+  usedComponents: string[],
+  debug?: (msg: string) => void
+): string {
+  if (css.length === 0) return ''
+
+  const usedSet = new Set(usedComponents)
+
+  // ── Phase 1: extract top-level blocks via character walker ────────
+  const blocks = parseBlocks(css)
 
   // ── Phase 2: evaluate each block ─────────────────────────────────
 

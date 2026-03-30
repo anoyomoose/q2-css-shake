@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { transformCSS } from '../src/css-transform.js'
+import { transformCSS, parseBlocks } from '../src/css-transform.js'
 
 describe('block parsing', () => {
   it('parses a single minified block', () => {
@@ -513,5 +513,46 @@ describe('debug output', () => {
     // This test just ensures no errors when debug is undefined
     const result = transformCSS('.q-btn{color:red}', ['q-btn'], [])
     expect(result).toBe('')
+  })
+})
+
+describe('parseBlocks', () => {
+  it('parses a single block', () => {
+    const blocks = parseBlocks('.q-btn{color:red}')
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0].selector).toBe('.q-btn')
+    expect(blocks[0].body).toBe('{color:red}')
+    expect(blocks[0].gapBefore).toBe('')
+  })
+
+  it('parses multiple blocks with gap', () => {
+    const blocks = parseBlocks('.a{x:1} .b{y:2}')
+    expect(blocks).toHaveLength(2)
+    expect(blocks[0].selector).toBe('.a')
+    expect(blocks[1].selector).toBe('.b')
+    expect(blocks[1].gapBefore).toBe(' ')
+  })
+
+  it('handles nested braces in at-rules', () => {
+    const blocks = parseBlocks('@media (min-width:600px){.a{x:1}}')
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0].selector).toBe('@media (min-width:600px)')
+    expect(blocks[0].body).toBe('{.a{x:1}}')
+  })
+
+  it('handles braces inside strings in body', () => {
+    const blocks = parseBlocks('.a{content:"}"}')
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0].body).toBe('{content:"}"}')
+  })
+
+  it('handles comments between blocks', () => {
+    const blocks = parseBlocks('.a{x:1}/* gap */.b{y:2}')
+    expect(blocks).toHaveLength(2)
+    expect(blocks[1].gapBefore).toBe('/* gap */')
+  })
+
+  it('returns empty array for empty input', () => {
+    expect(parseBlocks('')).toEqual([])
   })
 })

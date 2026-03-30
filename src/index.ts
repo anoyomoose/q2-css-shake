@@ -1,3 +1,6 @@
-export { transformCSS } from './css-transform.js'
+export { transformCSS, parseBlocks } from './css-transform.js'
+export type { Block } from './css-transform.js'
 export { cssShakePlugin } from './vite-plugin.js'
+export type { CssShakeOptions } from './vite-plugin.js'
 export { pascalToBem, scanComponentDir } from './component-scan.js'
+export { extractGlyphNames, discoverIconCssFiles, deriveIconPrefixes, scanJsForIcons } from './icon-scan.js'

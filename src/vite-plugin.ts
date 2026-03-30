@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 // Use inline types to avoid version mismatches when the consumer has a
 // different vite version than what we built against.
@@ -7,17 +7,21 @@ interface VitePlugin {
   name: string
   enforce?: 'pre' | 'post'
   configResolved?: (config: any) => void
+  renderChunk?: (code: string, chunk: any) => null
   generateBundle?: (options: any, bundle: Record<string, any>) => void
 }
 
 import { transformCSS } from './css-transform.js'
 import { pascalToBem, scanComponentDir } from './component-scan.js'
+import { extractGlyphNames, discoverIconCssFiles, deriveIconPrefixes, scanJsForIcons } from './icon-scan.js'
 
 export interface CssShakeOptions {
   /** Package subpaths to scan for component files, e.g. 'quasar/src/components' */
   scan: string[]
   /** Components to always keep (never strip). Accepts QBtn or q-btn format. */
   keep?: string[]
+  /** Shake unused icon glyph CSS from @quasar/extras icon packs. */
+  icons?: boolean
   /** Log known/used components and per-file size changes to console. */
   debug?: boolean
 }
@@ -65,6 +69,9 @@ function normalizeKeep(name: string): string {
 export function cssShakePlugin(options: CssShakeOptions): VitePlugin {
   let knownComponents: string[] = []
   let resolvedScanDirs: string[] = []
+  let knownIcons: Set<string> = new Set()
+  let iconPrefixes: string[] = []
+  const usedIcons = new Set<string>()
 
   return {
     name: 'vite:q2-css-shake',
@@ -95,58 +102,112 @@ export function cssShakePlugin(options: CssShakeOptions): VitePlugin {
       if (options.debug) {
         console.log(`[css-shake] Known components (${knownComponents.length}): ${knownComponents.join(', ')}`)
       }
+
+      if (options.icons) {
+        const extrasPath = resolvePackagePath('@quasar/extras', config.root)
+        const cssFiles = discoverIconCssFiles(extrasPath)
+
+        for (const file of cssFiles) {
+          const css = readFileSync(file, 'utf-8')
+          for (const name of extractGlyphNames(css)) {
+            knownIcons.add(name)
+          }
+        }
+
+        // Apply keeps to icons too
+        if (options.keep) {
+          for (const name of options.keep) {
+            knownIcons.delete(normalizeKeep(name))
+          }
+        }
+
+        iconPrefixes = deriveIconPrefixes(knownIcons)
+
+        if (options.debug) {
+          console.log(`[css-shake] Icon packs: ${cssFiles.length} CSS files, ${knownIcons.size} glyph rules`)
+          console.log(`[css-shake] Icon prefixes: ${iconPrefixes.join(', ')}`)
+        }
+      }
+    },
+
+    renderChunk(code: string, _chunk: any) {
+      if (knownIcons.size === 0) return null
+
+      const found = scanJsForIcons(code, knownIcons, iconPrefixes)
+      for (const name of found) {
+        usedIcons.add(name)
+      }
+
+      return null
     },
 
     generateBundle(_options, bundle) {
-      if (knownComponents.length === 0) return
+      if (knownComponents.length === 0 && knownIcons.size === 0) return
 
-      // Step 1: scan all chunks for component modules that survived tree-shaking
-      const usedSet = new Set<string>()
+      // Step 1: component CSS shaking
+      if (knownComponents.length > 0) {
+        const usedSet = new Set<string>()
 
-      for (const item of Object.values(bundle)) {
-        if (item.type !== 'chunk') continue
+        for (const item of Object.values(bundle)) {
+          if (item.type !== 'chunk') continue
+          for (const moduleId of Object.keys(item.modules)) {
+            const matchedDir = resolvedScanDirs.find(dir => moduleId.startsWith(dir))
+            if (!matchedDir) continue
+            const parts = moduleId.split('/')
+            const filename = parts[parts.length - 1]
+            const baseName = filename.split('.')[0]
+            const bem = pascalToBem(baseName)
+            if (bem !== null) {
+              usedSet.add(bem)
+            }
+          }
+        }
 
-        for (const moduleId of Object.keys(item.modules)) {
-          // Check if this module is under any of our scan directories
-          const matchedDir = resolvedScanDirs.find(dir => moduleId.startsWith(dir))
-          if (!matchedDir) continue
+        const usedComponents = [...usedSet].sort()
 
-          // Extract filename: take last path segment, strip extension, convert
-          const parts = moduleId.split('/')
-          const filename = parts[parts.length - 1]
-          const baseName = filename.split('.')[0]
-          const bem = pascalToBem(baseName)
-          if (bem !== null) {
-            usedSet.add(bem)
+        if (options.debug) {
+          console.log(`[css-shake] Used components (${usedComponents.length}): ${usedComponents.join(', ')}`)
+          const unused = knownComponents.filter(c => !usedSet.has(c))
+          console.log(`[css-shake] Unused components (${unused.length}): ${unused.join(', ')}`)
+        }
+
+        for (const item of Object.values(bundle)) {
+          if (item.type !== 'asset' || !item.fileName.endsWith('.css')) continue
+          if (typeof item.source !== 'string') continue
+
+          const inputSize = item.source.length
+          item.source = transformCSS(item.source, knownComponents, usedComponents)
+
+          if (options.debug) {
+            const outputSize = item.source.length
+            const saved = inputSize - outputSize
+            const pct = inputSize > 0 ? ((saved / inputSize) * 100).toFixed(1) : '0'
+            console.log(`[css-shake] ${item.fileName}: ${inputSize} -> ${outputSize} (${pct}% reduction)`)
           }
         }
       }
 
-      const usedComponents = [...usedSet].sort()
-
-      if (options.debug) {
-        console.log(`[css-shake] Used components (${usedComponents.length}): ${usedComponents.join(', ')}`)
-        const unused = knownComponents.filter(c => !usedSet.has(c))
-        console.log(`[css-shake] Unused components (${unused.length}): ${unused.join(', ')}`)
-      }
-
-      // Step 2: transform CSS assets
-      for (const item of Object.values(bundle)) {
-        if (item.type !== 'asset' || !item.fileName.endsWith('.css')) continue
-        if (typeof item.source !== 'string') continue
-
-        const inputSize = item.source.length
-        item.source = transformCSS(
-          item.source,
-          knownComponents,
-          usedComponents,
-        )
+      // Step 2: icon CSS shaking (second pass)
+      if (knownIcons.size > 0) {
+        const knownIconArr = [...knownIcons].sort()
+        const usedIconArr = [...usedIcons].sort()
 
         if (options.debug) {
-          const outputSize = item.source.length
-          const saved = inputSize - outputSize
-          const pct = inputSize > 0 ? ((saved / inputSize) * 100).toFixed(1) : '0'
-          console.log(`[css-shake] ${item.fileName}: ${inputSize} -> ${outputSize} (${pct}% reduction)`)
+          console.log(`[css-shake] Icons used: ${usedIconArr.length} of ${knownIconArr.length}`)
+        }
+
+        for (const item of Object.values(bundle)) {
+          if (item.type !== 'asset' || !item.fileName.endsWith('.css')) continue
+          if (typeof item.source !== 'string') continue
+
+          const beforeIcons = item.source.length
+          item.source = transformCSS(item.source, knownIconArr, usedIconArr)
+
+          if (options.debug && item.source.length !== beforeIcons) {
+            const saved = beforeIcons - item.source.length
+            const pct = beforeIcons > 0 ? ((saved / beforeIcons) * 100).toFixed(1) : '0'
+            console.log(`[css-shake] ${item.fileName} icons: ${beforeIcons} -> ${item.source.length} (${pct}% reduction)`)
+          }
         }
       }
     },
